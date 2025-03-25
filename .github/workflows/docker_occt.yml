@@ -1,0 +1,135 @@
+# This workflow builds the Open CASCADE Technology (OCCT) library on Ubuntu 22.04 using Clang and creates a Docker image.
+# It is triggered on pull requests to any branch and on pushes to the master branch.
+
+name: Build OCCT and Push Docker Image
+
+on:
+    pull_request:
+      branches:
+        - '**'
+    push:
+      branches:
+        - 'master'
+
+jobs:
+
+  prepare-and-build-linux-clang-x64:
+    name: Prepare and Build on Ubuntu with Clang (x64)
+    runs-on: ubuntu-22.04
+
+    steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v4.1.7
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y cmake clang make libx11-dev libglu1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev
+
+    - name: Clone OCCT
+      run: |
+        git clone https://github.com/Open-Cascade-SAS/OCCT.git OCCT
+
+    - name: Configure OCCT
+      run: |
+        cd OCCT
+        mkdir -p build
+        cd build
+        cmake -G "Unix Makefiles" \
+              -D CMAKE_C_COMPILER=clang \
+              -D CMAKE_CXX_COMPILER=clang++ \
+              -D BUILD_USE_PCH=ON \
+              -D BUILD_INCLUDE_SYMLINK=ON \
+              -D BUILD_OPT_PROFILE=Production \
+              -D BUILD_MODULE_Draw=OFF \
+              -D BUILD_MODULE_Visualization=OFF \
+              -D USE_TK=OFF \
+              -D CMAKE_BUILD_TYPE=Release \
+              -D INSTALL_DIR=${{ github.workspace }}/OCCT/install \
+              -D USE_FREETYPE=OFF \
+              -D USE_DRACO=OFF \
+              -D USE_FFMPEG=OFF \
+              -D USE_FREEIMAGE=OFF \
+              -D USE_GLES2=OFF \
+              -D USE_OPENVR=OFF \
+              -D USE_VTK=OFF \
+              -D USE_TBB=OFF \
+              -D USE_RAPIDJSON=OFF \
+              -D USE_OPENGL=OFF \
+              -D BUILD_GTEST=OFF \
+              -D BUILD_CPP_STANDARD=C++20 \
+              -D INSTALL_GTEST=OFF ..
+
+    - name: Build OCCT
+      run: |
+        cd OCCT
+        cd build
+        cmake --build . --target install --config Release -- -j
+
+    - name: Copying all dependencies
+      run: |
+        cd OCCT/install
+        cd bin
+        source env.sh
+        cd ../lib
+        for file in *.so; do
+          if [ -f "$file" ]; then
+            echo "Processing dependencies for $file"
+            for i in $(ldd "$file" | grep -o '/.*' | grep -v 'libTK' | grep -v 'libc.so' | grep -v 'libstdc++' | grep -v 'libgcc_s' | grep -v 'libpthread' | grep -v 'libdl' | grep -v 'libm.so'); do
+              cp -n "$i" . 2>/dev/null || true
+            done
+          fi
+        done
+
+    - name: Upload install directory
+      uses: actions/upload-artifact@v4.4.3
+      with:
+        name: install-linux-clang-x64
+        path: OCCT/install
+        retention-days: 7
+        
+    - name: Create Dockerfile
+      run: |
+        cat > OCCT/install/Dockerfile << 'EOF'
+        FROM ubuntu:22.04
+        
+        # Install minimal runtime dependencies
+        RUN apt-get update && apt-get install -y \
+            libx11-6 \
+            libglu1-mesa \
+            libegl1 \
+            libgles2 && \
+            apt-get clean && \
+            rm -rf /var/lib/apt/lists/*
+        
+        # Create directory structure
+        WORKDIR /usr/local/occt
+        
+        # Copy OCCT binaries and libraries
+        COPY bin /usr/local/occt/bin
+        COPY lib /usr/local/occt/lib
+        COPY include /usr/local/occt/include
+        
+        # Set environment variables
+        ENV LD_LIBRARY_PATH=/usr/local/occt/lib:$LD_LIBRARY_PATH
+        ENV PATH=/usr/local/occt/bin:$PATH
+        
+        CMD ["/bin/bash"]
+        EOF
+
+    - name: Log in to GitHub Container Registry
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: OCCT/install
+        file: OCCT/install/Dockerfile
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: |
+          ghcr.io/${{ github.repository }}/occt:latest
+          ghcr.io/${{ github.repository }}/occt:${{ github.sha }}
