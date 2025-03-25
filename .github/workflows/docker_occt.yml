@@ -107,7 +107,7 @@ jobs:
               -D PMP_BUILD_VIS=OFF \
               -D PMP_INSTALL=ON \
               -D BUILD_SHARED_LIBS=ON ..
-
+ 
     - name: Build PMP
       run: |
         cd pmp
